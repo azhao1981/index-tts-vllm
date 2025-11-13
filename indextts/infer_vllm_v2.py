@@ -481,6 +481,205 @@ class IndexTTS2:
             wav_data = wav_data.numpy().T
             return (sampling_rate, wav_data)
 
+    async def infer_stream(self, spk_audio_prompt, text, emo_audio_prompt=None, emo_alpha=1.0,
+                          emo_vector=None,
+                          use_emo_text=False, emo_text=None, use_random=False,
+                          interval_silence=200, verbose=False,
+                          max_text_tokens_per_sentence=120):
+        """
+        流式推理方法，实时生成音频数据
+
+        Args:
+            其他参数与infer方法相同
+
+        Returns:
+            (sampling_rate, audio_chunk_generator): 音频采样率和音频块生成器
+        """
+        logger.info(">> start streaming inference...")
+        start_time = time.perf_counter()
+
+        # 处理情感参数（复用现有逻辑）
+        if use_emo_text:
+            emo_audio_prompt = None
+            emo_alpha = 1.0
+            if emo_text is None:
+                emo_text = text
+            emo_dict, _ = await self.qwen_emo.inference(emo_text)
+            emo_vector = list(emo_dict.values())
+
+        if emo_vector is not None:
+            emo_audio_prompt = None
+            emo_alpha = 1.0
+
+        if emo_audio_prompt is None:
+            emo_audio_prompt = spk_audio_prompt
+            emo_alpha = 1.0
+
+        # 音频特征提取（复用现有逻辑）
+        audio, sr = librosa.load(spk_audio_prompt)
+        audio = torch.tensor(audio).unsqueeze(0)
+        audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio)
+        audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio)
+
+        inputs = self.extract_features(audio_16k, sampling_rate=16000, return_tensors="pt")
+        input_features = inputs["input_features"]
+        attention_mask = inputs["attention_mask"]
+        input_features = input_features.to(self.device)
+        attention_mask = attention_mask.to(self.device)
+        spk_cond_emb = self.get_emb(input_features, attention_mask)
+
+        ref_mel = self.mel_fn(audio_22k.to(spk_cond_emb.device).float())
+        feat = torchaudio.compliance.kaldi.fbank(audio_16k.to(ref_mel.device),
+                                                    num_mel_bins=80,
+                                                    frame_length=25, frame_shift=10,
+                                                    window_type='hamming')
+        style = self.campplus_model(feat)
+        style = F.normalize(style, p=2, dim=1)
+        prompt_condition = self.s2mel.models['prompt_converter'](style, ref_mel)
+
+        if use_random:
+            if emo_vector is None:
+                emo_vector = [0] * 8
+            weight_vector = torch.tensor(emo_vector).to(self.device)
+            weight_vector = torch.clamp(weight_vector, 0, 1.2)
+            weight_vector = weight_vector / torch.sum(weight_vector)
+            random_index = [find_most_similar_cosine(style, tmp) for tmp in self.spk_matrix]
+
+            emo_matrix = [tmp[index].unsqueeze(0) for index, tmp in zip(random_index, self.emo_matrix)]
+            emo_matrix = torch.cat(emo_matrix, 0)
+            emovec_mat = weight_vector.unsqueeze(1) * emo_matrix
+            emovec_mat = torch.sum(emovec_mat, 0)
+            emovec_mat = emovec_mat.unsqueeze(0)
+
+        emo_audio, _ = librosa.load(emo_audio_prompt, sr=16000)
+        emo_inputs = self.extract_features(emo_audio, sampling_rate=16000, return_tensors="pt")
+        emo_input_features = emo_inputs["input_features"]
+        emo_attention_mask = emo_inputs["attention_mask"]
+        emo_input_features = emo_input_features.to(self.device)
+        emo_attention_mask = emo_attention_mask.to(self.device)
+        emo_cond_emb = self.get_emb(emo_input_features, emo_attention_mask)
+
+        text_tokens_list = self.tokenizer.tokenize(text)
+        sentences = self.tokenizer.split_sentences(text_tokens_list, max_text_tokens_per_sentence)
+        if verbose:
+            print("text_tokens_list:", text_tokens_list)
+            print("sentences count:", len(sentences))
+            print("max_text_tokens_per_sentence:", max_text_tokens_per_sentence)
+            print(*sentences, sep="\n")
+
+        sampling_rate = 22050
+
+        # 流式处理函数
+        async def audio_chunk_generator():
+            """音频块生成器"""
+            try:
+                # 为每个句子生成音频块
+                for sent_idx, sent in enumerate(sentences):
+                    if verbose:
+                        print(f"Processing sentence {sent_idx + 1}/{len(sentences)}")
+
+                    text_tokens = self.tokenizer.convert_tokens_to_ids(sent)
+                    text_tokens = torch.tensor(text_tokens, dtype=torch.int32, device=self.device).unsqueeze(0)
+
+                    with torch.no_grad():
+                        emovec = self.gpt.merge_emovec(
+                            spk_cond_emb,
+                            emo_cond_emb,
+                            torch.tensor([spk_cond_emb.shape[-1]], device=text_tokens.device),
+                            torch.tensor([emo_cond_emb.shape[-1]], device=text_tokens.device),
+                            alpha=emo_alpha
+                        )
+
+                        if emo_vector is not None:
+                            emovec = emovec_mat + (1 - torch.sum(weight_vector)) * emovec
+                            # emovec = emovec_mat
+
+                        # 流式GPT推理生成codes
+                        codes, speech_conditioning_latent = await self.gpt.inference_speech(
+                            spk_cond_emb,
+                            text_tokens,
+                            emo_cond_emb,
+                            cond_lengths=torch.tensor([spk_cond_emb.shape[-1]], device=text_tokens.device),
+                            emo_cond_lengths=torch.tensor([emo_cond_emb.shape[-1]], device=text_tokens.device),
+                            emo_vec=emovec,
+                        )
+
+                        # 处理codes
+                        code_lens = []
+                        for code in codes:
+                            if self.stop_mel_token not in code:
+                                code_len = len(code)
+                            else:
+                                len_ = (code == self.stop_mel_token).nonzero(as_tuple=False)[0] + 1
+                                code_len = len_ - 1
+                            code_lens.append(code_len)
+                        codes = codes[:, :code_len]
+                        code_lens = torch.LongTensor(code_lens)
+                        code_lens = code_lens.to(self.device)
+
+                        # GPT forward pass
+                        latent = self.gpt(
+                            speech_conditioning_latent,
+                            text_tokens,
+                            torch.tensor([text_tokens.shape[-1]], device=text_tokens.device),
+                            codes,
+                            torch.tensor([codes.shape[-1]], device=text_tokens.device),
+                            emo_cond_emb,
+                            cond_mel_lengths=torch.tensor([spk_cond_emb.shape[-1]], device=text_tokens.device),
+                            emo_cond_mel_lengths=torch.tensor([emo_cond_emb.shape[-1]], device=text_tokens.device),
+                            emo_vec=emovec,
+                            use_speed=torch.zeros(spk_cond_emb.size(0)).to(spk_cond_emb.device).long(),
+                        )
+
+                        # S2Mel和BigVGAN处理
+                        with torch.amp.autocast(text_tokens.device.type, enabled=False, dtype=None):
+                            diffusion_steps = 25
+                            inference_cfg_rate = 0.7
+                            latent = self.s2mel.models['gpt_layer'](latent)
+                            S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
+                            S_infer = S_infer.transpose(1, 2)
+                            S_infer = S_infer + latent
+                            target_lengths = (code_lens * 1.72).long()
+
+                            cond = self.s2mel.models['length_regulator'](S_infer,
+                                                                        ylens=target_lengths,
+                                                                        n_quantizers=3,
+                                                                        f0=None)[0]
+                            cat_condition = torch.cat([prompt_condition, cond], dim=1)
+                            vc_target = self.s2mel.models['cfm'].inference(cat_condition,
+                                                                           torch.LongTensor([cat_condition.size(1)]).to(
+                                                                               cond.device),
+                                                                           ref_mel, style, None, diffusion_steps,
+                                                                           inference_cfg_rate=inference_cfg_rate)
+                            vc_target = vc_target[:, :, ref_mel.size(-1):]
+
+                            wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)
+                            wav = wav.squeeze(1)
+
+                        wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
+                        wav = wav.cpu()
+
+                        if verbose:
+                            print(f"Generated wav chunk shape: {wav.shape}")
+
+                        # 返回音频块
+                        yield wav.numpy()
+
+                    # 句子间的静音间隔处理
+                    if sent_idx < len(sentences) - 1 and interval_silence > 0:
+                        silence_samples = int(sampling_rate * interval_silence / 1000)
+                        silence = torch.zeros(1, silence_samples)
+                        yield silence.numpy()
+
+            except Exception as e:
+                logger.error(f"Streaming inference error: {e}")
+                raise
+
+        end_time = time.perf_counter()
+        logger.info(f">> Streaming inference setup time: {end_time - start_time:.2f} seconds")
+
+        return (sampling_rate, audio_chunk_generator())
+
 
 def find_most_similar_cosine(query_vector, matrix):
     query_vector = query_vector.float()
