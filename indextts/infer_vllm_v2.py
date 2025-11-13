@@ -662,14 +662,15 @@ class IndexTTS2:
                         if verbose:
                             print(f"Generated wav chunk shape: {wav.shape}")
 
-                        # 返回音频块
-                        yield wav.numpy()
+                        # 返回音频块（转置以匹配原始格式）
+                        wav_data = wav.type(torch.int16)
+                        yield wav_data.numpy().T
 
                     # 句子间的静音间隔处理
                     if sent_idx < len(sentences) - 1 and interval_silence > 0:
                         silence_samples = int(sampling_rate * interval_silence / 1000)
-                        silence = torch.zeros(1, silence_samples)
-                        yield silence.numpy()
+                        silence = torch.zeros(1, silence_samples, dtype=torch.int16)
+                        yield silence.numpy().T
 
             except Exception as e:
                 logger.error(f"Streaming inference error: {e}")
