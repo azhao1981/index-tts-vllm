@@ -1,7 +1,7 @@
 import os
-import asyncio
 import io
 import traceback
+import json
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
@@ -10,7 +10,6 @@ import uvicorn
 import argparse
 import time
 import soundfile as sf
-from typing import List, Optional
 
 from loguru import logger
 logger.add("logs/api_server_v2.1.log", rotation="10 MB", retention=10, level="DEBUG", enqueue=True)
@@ -83,7 +82,8 @@ async def audio_chunk_generator(data: dict):
             vec = emo_vec
             vec_sum = sum(vec)
             if vec_sum > 1.5:
-                yield b'{"error": "情感向量之和不能超过1.5，请调整后重试。"}'
+                error_msg = '{"error": "情感向量之和不能超过1.5，请调整后重试。"}'
+                yield error_msg.encode('utf-8')
                 return
         else:
             vec = None
@@ -121,16 +121,6 @@ async def tts_api_stream(request: Request):
     """流式TTS推理端点"""
     try:
         data = await request.json()
-
-        # 检查是否是错误响应
-        async for chunk in audio_chunk_generator(data):
-            if chunk.startswith(b'{"error":'):
-                return Response(
-                    status_code=500,
-                    content=chunk,
-                    media_type="application/json"
-                )
-            yield chunk
 
         return StreamingResponse(
             audio_chunk_generator(data),
