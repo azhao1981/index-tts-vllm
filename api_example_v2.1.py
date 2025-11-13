@@ -9,8 +9,10 @@ SERVER_PORT = 6006
 output_dir = "outputs"
 os.makedirs(output_dir, exist_ok=True)
 
-url = F"http://0.0.0.0:{SERVER_PORT}/tts_url"
-url = "https://uu813239-bdea-b60ef73b.bjb1.seetacloud.com:8443/tts_url"
+# 流式端点
+stream_url = f"http://0.0.0.0:{SERVER_PORT}/tts_url_stream"
+# 非流式端点（保持兼容）
+normal_url = f"http://0.0.0.0:{SERVER_PORT}/tts_url"
 
 @dataclass
 class IndexTTS2RequestData:
@@ -25,19 +27,19 @@ class IndexTTS2RequestData:
     max_text_tokens_per_sentence: int = 120
 
     def __post_init__(self):
-        # 保证 emo_vec 默认长度为 8 的 0 向量
         if self.emo_vec is None:
             self.emo_vec = [0.0] * 8
 
     def to_dict(self) -> str:
         return asdict(self)
+
 text = """
 沃丰零食品牌创立于2012年，截至2025年已成立13年。截至目前在国内签约门店超8000家。门店分布于全国28个省级区域、300多个城市，主要集中在广东、广西、海南、河南、河北等地。沃丰零食是聚焦新中式风味的零食连锁品牌，主打经典中式、创新、健康轻食等多系列零食，融合传统风味与现代需求，提供多元健康的零食选择。
 今年对加盟的扶持力度较大，目前有减免加盟费的政策；减免费用包含品牌使用费30000元、培训费20000元、设计费3000元、系统使用费2000元。具体政策需根据您的实际情况确定。
 """
-# text = "还是会想你，还是想登你"
 
-# 1. 情感与音色参考音频相同
+# 1. 流式请求测试
+print("=== 流式请求测试 ===")
 print(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 begin = time.time()
 
@@ -46,56 +48,39 @@ data = IndexTTS2RequestData(
     spk_audio_path="assets/jay_promptvn.wav"
 )
 
-response = requests.post(url, json=data.to_dict())
-with open(os.path.join(output_dir, "output1.wav"), "wb") as f:
-    f.write(response.content)
+# 使用 stream=True 进行流式请求
+response = requests.post(stream_url, json=data.to_dict(), stream=True)
+
+if response.status_code == 200:
+    with open(os.path.join(output_dir, "output_stream.wav"), "wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+    print("流式音频文件已保存: output_stream.wav")
+else:
+    print(f"流式请求失败: {response.status_code}")
+    print(response.text)
 
 end = time.time()
 print(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-print(f"总耗时: {end - begin:.2f} 秒")
+print(f"流式请求总耗时: {end - begin:.2f} 秒")
+print()
 
+# 2. 非流式请求测试（对比）
+print("=== 非流式请求测试 ===")
+print(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+begin = time.time()
 
+response = requests.post(normal_url, json=data.to_dict())
 
-# 2. 使用情感参考音频
-data = IndexTTS2RequestData(
-    text=text,
-    spk_audio_path="assets/jay_promptvn.wav",
-    emo_control_method=1,
-    emo_ref_path="assets/vo_card_klee_endOfGame_fail_01.wav",
-    emo_weight=0.6
-)
+if response.status_code == 200:
+    with open(os.path.join(output_dir, "output_normal.wav"), "wb") as f:
+        f.write(response.content)
+    print("非流式音频文件已保存: output_normal.wav")
+else:
+    print(f"非流式请求失败: {response.status_code}")
+    print(response.text)
 
-response = requests.post(url, json=data.to_dict())
-with open(os.path.join(output_dir, "output2.wav"), "wb") as f:
-    f.write(response.content)
-
-
-
-# 3. 使用情感向量控制
-# ["喜", "怒", "哀", "惧", "厌恶", "低落", "惊喜", "平静"]
-emo_vec = [0, 0, 0.55, 0, 0, 0, 0, 0]
-
-data = IndexTTS2RequestData(
-    text=text,
-    spk_audio_path="assets/jay_promptvn.wav",
-    emo_control_method=2,
-    emo_vec=emo_vec
-)
-
-response = requests.post(url, json=data.to_dict())
-with open(os.path.join(output_dir, "output3.wav"), "wb") as f:
-    f.write(response.content)
-
-
-
-# 4. 使用情感描述文本控制
-data = IndexTTS2RequestData(
-    text=text,
-    spk_audio_path="assets/jay_promptvn.wav",
-    emo_control_method=3,
-    emo_text="极度悲伤"
-)
-
-response = requests.post(url, json=data.to_dict())
-with open(os.path.join(output_dir, "output4.wav"), "wb") as f:
-    f.write(response.content)
+end = time.time()
+print(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+print(f"非流式请求总耗时: {end - begin:.2f} 秒")
