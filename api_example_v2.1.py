@@ -10,7 +10,8 @@ output_dir = "outputs"
 os.makedirs(output_dir, exist_ok=True)
 
 # 流式端点
-stream_url = f"http://0.0.0.0:{SERVER_PORT}/tts_url_stream"
+# stream_url = f"http://0.0.0.0:{SERVER_PORT}/tts_url_stream"
+stream_url = "https://uu813239-bdea-b60ef73b.bjb1.seetacloud.com:8443/tts_url_stream"
 # 非流式端点（保持兼容）
 normal_url = f"http://0.0.0.0:{SERVER_PORT}/tts_url"
 
@@ -54,6 +55,7 @@ response = requests.post(stream_url, json=data.to_dict(), stream=True)
 if response.status_code == 200:
     with open(os.path.join(output_dir, "output_stream.wav"), "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
+            print("正在写入音频文件...", chunk)
             if chunk:
                 f.write(chunk)
     print("流式音频文件已保存: output_stream.wav")
@@ -67,20 +69,20 @@ print(f"流式请求总耗时: {end - begin:.2f} 秒")
 print()
 
 # 2. 非流式请求测试（对比）
-print("=== 非流式请求测试 ===")
-print(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-begin = time.time()
+# print("=== 非流式请求测试 ===")
+# print(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# begin = time.time()
 
-response = requests.post(normal_url, json=data.to_dict())
+# response = requests.post(normal_url, json=data.to_dict())
 
-if response.status_code == 200:
-    with open(os.path.join(output_dir, "output_normal.wav"), "wb") as f:
-        f.write(response.content)
-    print("非流式音频文件已保存: output_normal.wav")
-else:
-    print(f"非流式请求失败: {response.status_code}")
-    print(response.text)
+# if response.status_code == 200:
+#     with open(os.path.join(output_dir, "output_normal.wav"), "wb") as f:
+#         f.write(response.content)
+#     print("非流式音频文件已保存: output_normal.wav")
+# else:
+#     print(f"非流式请求失败: {response.status_code}")
+#     print(response.text)
 
-end = time.time()
-print(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-print(f"非流式请求总耗时: {end - begin:.2f} 秒")
+# end = time.time()
+# print(f"结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# print(f"非流式请求总耗时: {end - begin:.2f} 秒")
