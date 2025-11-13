@@ -481,7 +481,7 @@ class IndexTTS2:
             wav_data = wav_data.numpy().T
             return (sampling_rate, wav_data)
 
-    async def infer_stream(self, spk_audio_prompt, text, emo_audio_prompt=None, emo_alpha=1.0,
+    async def infer_stream(self, spk_audio_prompt, text, output_path=None, emo_audio_prompt=None, emo_alpha=1.0,
                           emo_vector=None,
                           use_emo_text=False, emo_text=None, use_random=False,
                           interval_silence=200, verbose=False,
